@@ -6,6 +6,12 @@ from messages import Upload, Request
 from util import even_split
 from peer import Peer
 
+#Assumptions made
+    #The lookback window is two rounds as reading specified 20 seconds and intructions state each round is 10s
+    #Upload to random requesters/everyone unblocked in round 0 since no history
+    #If there are fewer than 4 requesters just split bandwidth amongst them
+    #Replace optimistic unblock if they stop requesting
+
 class MaxncodyStd(Peer):
     def post_init(self):
         self.optomistic_unblock = None #peer id
