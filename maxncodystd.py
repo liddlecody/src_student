@@ -1,11 +1,4 @@
 #!/usr/bin/python
-
-# This is a dummy peer that just illustrates the available information your peers 
-# have available.
-
-# You'll want to copy this file to AgentNameXXX.py for various versions of XXX,
-# probably get rid of the silly logging messages, and then add more logic.
-
 import random
 import logging
 
@@ -33,41 +26,36 @@ class MaxncodyStd(Peer):
         np_set = set(needed_pieces)  # sets support fast intersection ops.
 
 
-        logging.debug("%s here: still need pieces %s" % (
-            self.id, needed_pieces))
+        #avaliability for rarity sorting
+        availability = {}
 
-        logging.debug("%s still here. Here are some peers:" % self.id)
-        for p in peers:
-            logging.debug("id: %s, available pieces: %s" % (p.id, p.available_pieces))
+        for piece_id in needed_pieces:
+            availability[piece_id] = 0
+        for peer in peers:
+            for piece_id in peer.available_pieces:
+                if piece_id in availability:
+                    availability[piece_id] += 1
 
-        logging.debug("And look, I have my entire history available too:")
-        logging.debug("look at the AgentHistory class in history.py for details")
-        logging.debug(str(history))
+        #sort by rarity, use random to tiebreak
+        random.shuffle(needed_pieces)
+        needed_pieces.sort(key=lambda p: availability[p])
 
         requests = []   # We'll put all the things we want here
         # Symmetry breaking is good...
-        random.shuffle(needed_pieces)
         
-        # Sort peers by id.  This is probably not a useful sort, but other 
-        # sorts might be useful
-        peers.sort(key=lambda p: p.id)
         # request all available pieces from all peers!
         # (up to self.max_requests from each)
         for peer in peers:
             av_set = set(peer.available_pieces)
             isect = av_set.intersection(np_set)
-            n = min(self.max_requests, len(isect))
-            # More symmetry breaking -- ask for random pieces.
-            # This would be the place to try fancier piece-requesting strategies
-            # to avoid getting the same thing from multiple peers at a time.
-            for piece_id in random.sample(sorted(isect), n):
-                # aha! The peer has this piece! Request it.
-                # which part of the piece do we need next?
-                # (must get the next-needed blocks in order)
+            #filter on rarest first
+            peer_pieces = [p for p in needed_pieces if p in isect]
+
+            n = min(self.max_requests, len(peer_pieces))
+            for piece_id in peer_pieces[:n]:
                 start_block = self.pieces[piece_id]
                 r = Request(self.id, peer.id, piece_id, start_block)
                 requests.append(r)
-
         return requests
 
     def uploads(self, requests, peers, history):
