@@ -8,9 +8,8 @@ from peer import Peer
 
 class MaxncodyStd(Peer):
     def post_init(self):
-        print(("post_init(): %s here!" % self.id))
-        self.dummy_state = dict()
-        self.dummy_state["cake"] = "lie"
+        self.optomistic_unblock = None #peer id
+        self.optomistic_unblock_round = 0 #track when last changed
     
     def requests(self, peers, history):
         """
@@ -70,29 +69,52 @@ class MaxncodyStd(Peer):
         """
 
         round = history.current_round()
-        logging.debug("%s again.  It's round %d." % (
-            self.id, round))
         # One could look at other stuff in the history too here.
         # For example, history.downloads[round-1] (if round != 0, of course)
         # has a list of Download objects for each Download to this peer in
         # the previous round.
 
         if len(requests) == 0:
-            logging.debug("No one wants my pieces!")
             chosen = []
             bws = []
         else:
-            logging.debug("Still here: uploading to a random peer")
-            # change my internal state for no reason
-            self.dummy_state["cake"] = "pie"
-
-            request = random.choice(requests)
-            chosen = [request.requester_id]
-            # Evenly "split" my upload bandwidth among the one chosen requester
-            bws = even_split(self.up_bw, len(chosen))
-
-        # create actual uploads out of the list of peer ids and bandwidths
-        uploads = [Upload(self.id, peer_id, bw)
-                   for (peer_id, bw) in zip(chosen, bws)]
+            requesting_peers = set(r.requester_id for r in requests)
+            #rank peers by download rate for reciprocation 
+            download_totals = {}
+            lookback = min(round, 2)  #up to 2 rounds
+            for r in range(max(0, round - lookback), round):
+                for download in history.downloads[r]:
+                    if download.from_id in requesting_peers:
+                        download_totals[download.from_id] = (
+                            download_totals.get(download.from_id, 0) + download.blocks
+                        )
             
+            #sort peers by how much they gave us 
+            givers = [(pid, blocks) for pid, blocks in download_totals.items() if blocks > 0]
+            givers.sort(key=lambda x: x[1], reverse=True)
+
+            #give top 3 the regular slots
+            regular_unblock = [pid for pid, _ in givers[:3]]
+
+            #optimistic unblock 
+            remaining = [pid for pid in requesting_peers if pid not in regular_unblock]
+    
+            if (round % 3 == 0) or (self.optimistic_unblock not in remaining):
+                if remaining:
+                    self.optimistic_unblock = random.choice(list(remaining))
+                else:
+                    self.optimistic_unblock = None
+
+
+            chosen = list(regular_unblock)
+            if self.optimistic_unblock and self.optimistic_unblock in requesting_peers:
+                if self.optimistic_unblock not in chosen:
+                    chosen.append(self.optimistic_unblock)
+
+            #split bandwidth evenly among chosen peers
+            bws = even_split(self.up_bw, len(chosen))
+            
+            uploads = [Upload(self.id, peer_id, bw)
+                    for (peer_id, bw) in zip(chosen, bws)]
+                    
         return uploads
