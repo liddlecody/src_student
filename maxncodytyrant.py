@@ -13,6 +13,10 @@ from messages import Upload, Request
 from util import even_split
 from peer import Peer
 
+#Assumptions
+   #u_j and d_j chosen to simulate an equal split per slot allocation similar to textbooks values, and an roi of 1 
+   #Each peer gets exactly their upload bid, so there may be more or less than 4 peers unblocked
+   #requests rarest first, from as many peers as possible
 class MaxncodyTyrant(Peer):
     def post_init(self):
         self.d = {}  #estimated download rate from peer j
