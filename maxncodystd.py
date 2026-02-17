@@ -14,8 +14,8 @@ from peer import Peer
 
 class MaxncodyStd(Peer):
     def post_init(self):
-        self.optomistic_unblock = None #peer id
-        self.optomistic_unblock_round = 0 #track when last changed
+        self.optimistic_unblock = None #peer id
+        self.optimistic_unblock_round = 0 #track when last changed
     
     def requests(self, peers, history):
         """
@@ -81,8 +81,7 @@ class MaxncodyStd(Peer):
         # the previous round.
 
         if len(requests) == 0:
-            chosen = []
-            bws = []
+            return []
         else:
             requesting_peers = set(r.requester_id for r in requests)
             #rank peers by download rate for reciprocation 
