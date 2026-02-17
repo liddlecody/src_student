@@ -17,10 +17,10 @@ class MaxncodyTyrant(Peer):
     def post_init(self):
         self.d = {}  #estimated download rate from peer j
         self.u = {}  #estimated min upload to get peer j to reciprocate
-        self.unblock_history = {}  #track consecutive rounds j has unchoked us
+        self.unblock_history = {}  #track consecutive rounds j has unblocked us
         self.my_unblock = {}  #track who we unblocked last round
 
-        self.alpha = 0.2
+        self.alpha = 0.2 #currently using vals from textbook
         self.gamma = 0.1
         self.r = 3  #consecutive rounds threshold for decreasing u_j
     
