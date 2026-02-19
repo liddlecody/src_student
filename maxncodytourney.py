@@ -13,11 +13,23 @@ from messages import Upload, Request
 from util import even_split
 from peer import Peer
 
+#taking a bittyrant aprroach, but slightly more generous to encourage other tyrants to share with us, and then a more aggressive 
+#alpha for reducing bandwidth spent on freeloaders
+
 class MaxncodyTourney(Peer):
     def post_init(self):
-        print(("post_init(): %s here!" % self.id))
-        self.dummy_state = dict()
-        self.dummy_state["cake"] = "lie"
+        self.d = {}  #estimated download rate from peer j
+        self.u = {}  #estimated min upload to get peer j to reciprocate
+        self.unblock_history = {}  #consecutive rounds j unblocked us
+        self.my_unblocks = set()  #who we unchoked last round
+        self.optimistic_unblock = None
+        self.optimistic_unblock_round = 0
+
+        self.alpha = 0.2   
+        self.gamma = 0.1   
+        self.r = 3          #consecutive rounds threshold
+        self.generosity = 1.2  #send 20% more than estimated minimum bid
+        self.optimistic_share = 0.10  #reserve 10% for optimistic unblocking
     
     def requests(self, peers, history):
         """
@@ -32,41 +44,31 @@ class MaxncodyTourney(Peer):
         needed_pieces = list(filter(needed, list(range(len(self.pieces)))))
         np_set = set(needed_pieces)  # sets support fast intersection ops.
 
+        if not needed_pieces:
+            return []
+        
+        #same rarity first logic
+        availability = {}
+        for piece_id in needed_pieces:
+            availability[piece_id] = 0
+        for peer in peers:
+            for piece_id in peer.available_pieces:
+                if piece_id in availability:
+                    availability[piece_id] += 1
 
-        logging.debug("%s here: still need pieces %s" % (
-            self.id, needed_pieces))
-
-        logging.debug("%s still here. Here are some peers:" % self.id)
-        for p in peers:
-            logging.debug("id: %s, available pieces: %s" % (p.id, p.available_pieces))
-
-        logging.debug("And look, I have my entire history available too:")
-        logging.debug("look at the AgentHistory class in history.py for details")
-        logging.debug(str(history))
+        random.shuffle(needed_pieces)
+        needed_pieces.sort(key=lambda p: availability[p])
 
         requests = []   # We'll put all the things we want here
-        # Symmetry breaking is good...
-        random.shuffle(needed_pieces)
-        
-        # Sort peers by id.  This is probably not a useful sort, but other 
-        # sorts might be useful
-        peers.sort(key=lambda p: p.id)
-        # request all available pieces from all peers!
-        # (up to self.max_requests from each)
+
         for peer in peers:
             av_set = set(peer.available_pieces)
             isect = av_set.intersection(np_set)
-            n = min(self.max_requests, len(isect))
-            # More symmetry breaking -- ask for random pieces.
-            # This would be the place to try fancier piece-requesting strategies
-            # to avoid getting the same thing from multiple peers at a time.
-            for piece_id in random.sample(sorted(isect), n):
-                # aha! The peer has this piece! Request it.
-                # which part of the piece do we need next?
-                # (must get the next-needed blocks in order)
+            peer_pieces = [p for p in needed_pieces if p in isect]
+            n = min(self.max_requests, len(peer_pieces))
+            for piece_id in peer_pieces[:n]:
                 start_block = self.pieces[piece_id]
-                r = Request(self.id, peer.id, piece_id, start_block)
-                requests.append(r)
+                requests.append(Request(self.id, peer.id, piece_id, start_block))
 
         return requests
 
@@ -82,29 +84,103 @@ class MaxncodyTourney(Peer):
         """
 
         round = history.current_round()
-        logging.debug("%s again.  It's round %d." % (
-            self.id, round))
-        # One could look at other stuff in the history too here.
-        # For example, history.downloads[round-1] (if round != 0, of course)
-        # has a list of Download objects for each Download to this peer in
-        # the previous round.
 
         if len(requests) == 0:
-            logging.debug("No one wants my pieces!")
-            chosen = []
-            bws = []
+            return []
+
+        requesting_peers = set(r.requester_id for r in requests)
+
+        #estimates for new peers
+        for peer in peers:
+            if peer.id not in self.u:
+                self.u[peer.id] = self.conf.min_up_bw / 4.0
+            if peer.id not in self.d:
+                self.d[peer.id] = self.conf.min_up_bw / 4.0
+            if peer.id not in self.unblock_history:
+                self.unblock_history[peer.id] = 0
+
+        #update estimates from last round
+        if round > 0:
+            last_round_uploaders = {}
+            for download in history.downloads[round - 1]:
+                last_round_uploaders[download.from_id] = (
+                    last_round_uploaders.get(download.from_id, 0) + download.blocks
+                )
+
+            for peer in peers:
+                pid = peer.id
+                if pid in last_round_uploaders:
+                    self.d[pid] = last_round_uploaders[pid]
+                    self.unblock_history[pid] = self.unblock_history.get(pid, 0) + 1
+                else:
+                    self.unblock_history[pid] = 0
+
+            #update u_j based on reciprocation
+            for pid in self.my_unblocks:
+                if pid in last_round_uploaders:
+                    if self.unblock_history.get(pid, 0) >= self.r:
+                        self.u[pid] = self.u[pid] * (1 - self.gamma)
+                else:
+                    self.u[pid] = self.u[pid] * (1 + self.alpha)
+
+        #reserve bandwidth for optimistic unblocking
+        optimistic_bw = max(1, int(self.up_bw * self.optimistic_share))
+        remaining_bw = self.up_bw - optimistic_bw
+
+        #rank requesting peers by roi
+        candidates = []
+        for pid in requesting_peers:
+            if pid in self.d and pid in self.u and self.u[pid] > 0:
+                roi = self.d[pid] / self.u[pid]
+                candidates.append((pid, roi, self.u[pid]))
+
+        candidates.sort(key=lambda x: x[1], reverse=True)
+
+        #assign bandwith greedily with generosity mod
+        chosen = []
+        bws = []
+
+        for pid, roi, bid in candidates:
+            if remaining_bw <= 0:
+                break
+            #be slightly generous to ensure reciprocation
+            alloc = int(min(bid * self.generosity, remaining_bw))
+            if alloc > 0:
+                chosen.append(pid)
+                bws.append(alloc)
+                remaining_bw -= alloc
+
+        #distribute leftover bw to top peers
+        if remaining_bw > 0 and chosen:
+            bws[0] += remaining_bw
+
+        #optimistic unblock
+        unblocked_set = set(chosen)
+        remaining_requesters = [pid for pid in requesting_peers if pid not in unblocked_set]
+
+        #pick new optimistic unblock every 3 rounds or if current one isn't requesting
+        if (round % 3 == 0) or (self.optimistic_unblock not in remaining_requesters):
+            if remaining_requesters:
+                self.optimistic_unblock = random.choice(remaining_requesters)
+            else:
+                self.optimistic_unblock = None
+
+        if self.optimistic_unblock and self.optimistic_unblock in requesting_peers:
+            if self.optimistic_unblock not in unblocked_set:
+                chosen.append(self.optimistic_unblock)
+                bws.append(optimistic_bw)
+            else:
+                #already chosen via roi, redistribute optimistic bw to top peer
+                if bws:
+                    bws[0] += optimistic_bw
         else:
-            logging.debug("Still here: uploading to a random peer")
-            # change my internal state for no reason
-            self.dummy_state["cake"] = "pie"
+            #give bw to top peer if no one to opt unblock
+            if bws:
+                bws[0] += optimistic_bw
 
-            request = random.choice(requests)
-            chosen = [request.requester_id]
-            # Evenly "split" my upload bandwidth among the one chosen requester
-            bws = even_split(self.up_bw, len(chosen))
+        self.my_unblocks = set(chosen)
 
-        # create actual uploads out of the list of peer ids and bandwidths
         uploads = [Upload(self.id, peer_id, bw)
                    for (peer_id, bw) in zip(chosen, bws)]
-            
+
         return uploads
