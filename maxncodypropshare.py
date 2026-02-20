@@ -33,16 +33,15 @@ class MaxncodyPropShare(Peer):
         np_set = set(needed_pieces)  # sets support fast intersection ops.
 
 
-        logging.debug("%s here: still need pieces %s" % (
-            self.id, needed_pieces))
+        # logging.debug("%s here: still need pieces %s" % (self.id, needed_pieces))
 
-        logging.debug("%s still here. Here are some peers:" % self.id)
+        # logging.debug("%s still here. Here are some peers:" % self.id)
         for p in peers:
             logging.debug("id: %s, available pieces: %s" % (p.id, p.available_pieces))
 
-        logging.debug("And look, I have my entire history available too:")
-        logging.debug("look at the AgentHistory class in history.py for details")
-        logging.debug(str(history))
+        # logging.debug("And look, I have my entire history available too:")
+        # logging.debug("look at the AgentHistory class in history.py for details")
+        # logging.debug(str(history))
 
         requests = []   # We'll put all the things we want here
         # Symmetry breaking is good...
@@ -80,31 +79,48 @@ class MaxncodyPropShare(Peer):
 
         In each round, this will be called after requests().
         """
-
         round = history.current_round()
-        logging.debug("%s again.  It's round %d." % (
-            self.id, round))
-        # One could look at other stuff in the history too here.
-        # For example, history.downloads[round-1] (if round != 0, of course)
-        # has a list of Download objects for each Download to this peer in
-        # the previous round.
-
+                
         if len(requests) == 0:
-            logging.debug("No one wants my pieces!")
-            chosen = []
-            bws = []
+            return []
+
+        # Identify all unique peers currently requesting data
+        requester_ids = list(set(r.requester_id for r in requests))
+        
+        contributions = {p_id: 0 for p_id in requester_ids}
+        total_contributed = 0
+
+        if round > 0:
+            # Check all downloads I received in the previous round
+            for download in history.downloads[round-1]:
+                # If the download was to me, AND came from someone currently requesting
+                if download.to_id == self.id and download.from_id in contributions:
+                    contributions[download.from_id] += download.blocks
+                    total_contributed += download.blocks
+
+        # 90% for contributors, 10% for optimistic
+        # Use self.up_bw to get actual block count
+        reserve_bw = int(self.up_bw * 0.90)
+        optimistic_bw = self.up_bw - reserve_bw
+        
+        bws = {} # {peer_id: allocated_bandwidth}
+
+        # 90%
+        if total_contributed > 0:
+            for p_id in contributions:
+                if contributions[p_id] > 0:
+                    # (Contribution / Total) * Reserve_BW
+                    share = (contributions[p_id] / total_contributed) * reserve_bw
+                    bws[p_id] = int(share)
+        
+        # The 10%
+        choice = random.choice(requester_ids)
+        
+        if choice in bws:
+            bws[choice] += optimistic_bw
         else:
-            logging.debug("Still here: uploading to a random peer")
-            # change my internal state for no reason
-            self.dummy_state["cake"] = "pie"
+            bws[choice] = optimistic_bw
 
-            request = random.choice(requests)
-            chosen = [request.requester_id]
-            # Evenly "split" my upload bandwidth among the one chosen requester
-            bws = even_split(self.up_bw, len(chosen))
-
-        # create actual uploads out of the list of peer ids and bandwidths
-        uploads = [Upload(self.id, peer_id, bw)
-                   for (peer_id, bw) in zip(chosen, bws)]
-            
+        uploads = [Upload(self.id, p_id, bw) for (p_id, bw) in bws.items() if bw > 0]
+        
         return uploads

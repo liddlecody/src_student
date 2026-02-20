@@ -14,7 +14,7 @@ from util import even_split
 from peer import Peer
 
 #taking a bittyrant aprroach, but slightly more generous to encourage other tyrants to share with us, and then a more aggressive 
-#alpha for reducing bandwidth spent on freeloaders
+#alpha for reducing bandwidth spent on freeloaders. Added a bootstrapping phase to help build relationships early
 
 class MaxncodyTourney(Peer):
     def post_init(self):
@@ -28,8 +28,9 @@ class MaxncodyTourney(Peer):
         self.alpha = 0.2   
         self.gamma = 0.1   
         self.r = 3          #consecutive rounds threshold
-        self.generosity = 1.2  #send 20% more than estimated minimum bid
-        self.optimistic_share = 0.10  #reserve 10% for optimistic unblocking
+        self.generosity = 1.5
+        self.optimistic_share = 0.15 
+        self.bootstrap_rounds = 10
     
     def requests(self, peers, history):
         """
@@ -87,15 +88,47 @@ class MaxncodyTourney(Peer):
 
         if len(requests) == 0:
             return []
-
+        #bootstrap
         requesting_peers = set(r.requester_id for r in requests)
+        if round < self.bootstrap_rounds:
+            download_totals = {}
+            lookback = min(round, 2)
+            for r_idx in range(max(0, round - lookback), round):
+                for download in history.downloads[r_idx]:
+                    if download.from_id in requesting_peers:
+                        download_totals[download.from_id] = (
+                            download_totals.get(download.from_id, 0) + download.blocks
+                        )
+
+            givers = [(pid, blocks) for pid, blocks in download_totals.items() if blocks > 0]
+            givers.sort(key=lambda x: x[1], reverse=True)
+            regular = [pid for pid, _ in givers[:3]]
+
+            remaining = [pid for pid in requesting_peers if pid not in regular]
+            if (round % 3 == 0) or (self.optimistic_unblock not in remaining):
+                if remaining:
+                    self.optimistic_unblock = random.choice(remaining)
+                else:
+                    self.optimistic_unblock = None
+
+            chosen = list(regular)
+            if self.optimistic_unblock and self.optimistic_unblock in requesting_peers:
+                if self.optimistic_unblock not in chosen:
+                    chosen.append(self.optimistic_unblock)
+
+            if not chosen:
+                chosen = list(random.sample(list(requesting_peers), min(4, len(requesting_peers))))
+
+            bws = even_split(self.up_bw, len(chosen))
+            self.my_unblocks = set(chosen)
+            return [Upload(self.id, pid, bw) for pid, bw in zip(chosen, bws)]
 
         #estimates for new peers
         for peer in peers:
             if peer.id not in self.u:
-                self.u[peer.id] = self.conf.min_up_bw / 4.0
+                self.u[peer.id] = max(1, self.conf.min_up_bw / 4.0)
             if peer.id not in self.d:
-                self.d[peer.id] = self.conf.min_up_bw / 4.0
+                self.d[peer.id] = max(1, self.conf.min_up_bw / 4.0)
             if peer.id not in self.unblock_history:
                 self.unblock_history[peer.id] = 0
 
